@@ -179,3 +179,17 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Local participant configuration
+local_config.py
+
+# Never commit fNIRS data or generated analysis files
+*.snirf
+*.fif
+
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]

@@ -1,37 +1,41 @@
-# AttSwitch fNIRS Preprocessing
+"""
+AttSwitch fNIRS preprocessing pipeline.
 
+preprocesses one participant at a time from raw SNIRF data to cleaned continuous HbO/HbR data for analysis
+(participant-specific file paths are stored in local_config.py)
 
-# pipeline:
-#
-# SNIRF
-# optical density
-# scalp coupling index (SCI)
-# mark low-SCI channels bad
-# TDDR motion correction
-# short-separation regression
-# beer lambert HbO/HbR conversion
-# remove short-separation channels from analysis copy
-# 0.01-0.20Hz band-pass filter
-# save cleaned data, QC tables, parameters, and figures
-#
-# can only run one participant at a time.
+PIPELINE
+1. load SNIRF data and LSL event annotations
+2. save raw-intensity quality-control info
+3. crop recording at the final task-end marker
+4. convert raw intensity to optical density
+5. signal quality - scalp coupling index (SCI)
+6. mark SCI<0.70 source-detector pairs as bad
+7. TDDR motion correction
+8. short-separation regression
+9. convert optical density to HbO/HbR - Beer-Lambert law
+10. remove short-separation channels from cortical analysis copy
+11. apply 0.01-0.20 Hz band-pass filter
+12. save cleaned data, QC tables, figures, and preprocessing summaries
 
+"""
 
-
-# SETUP
 
 from pathlib import Path
 import json
 import warnings
+
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
 import mne
 import mne_nirs
 import numpy as np
 import pandas as pd
+
 from scipy.signal import butter, filtfilt
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-# MNE-Python fNIRS preprocessing functions
+
 from mne.preprocessing.nirs import (
     source_detector_distances,
     optical_density,
@@ -39,11 +43,11 @@ from mne.preprocessing.nirs import (
     temporal_derivative_distribution_repair,
     beer_lambert_law,
 )
-# MNE-NIRS signal enhancement
+
 from mne_nirs.signal_enhancement import (
     short_channel_regression,
 )
-# MNE-NIRS time-resolved quality-control functions
+
 from mne_nirs.preprocessing import (
     scalp_coupling_index_windowed,
     peak_power,
@@ -51,8 +55,6 @@ from mne_nirs.preprocessing import (
 
 
 # PARTICIPANT CONFIGURATION
-# Participant-specific paths are stored locally and are
-# intentionally excluded from Git version control.
 
 from local_config import (
     PARTICIPANT_ID,
@@ -76,18 +78,20 @@ SCI_H_FREQ = 1.50
 SCI_L_TRANS_BW = 0.30
 SCI_H_TRANS_BW = 0.30
 
-WINDOWED_QC_WINDOW_S = 10.0     # window length for time-resolved SCI and PSP quality control
-CROP_AT_FINAL_TASK_END = True   # crop non-task recording time before preprocessing.
-FINAL_TASK_END_CODE = "6"       # LSL code 6 marks the end of the final task block.
+WINDOWED_QC_WINDOW_S = 10.0
 
-PPF = (6.0)
+CROP_AT_FINAL_TASK_END = True
+FINAL_TASK_END_CODE = "6"
+
+PPF = 6.0
+
 FILTER_L_FREQ = 0.01
 FILTER_H_FREQ = 0.20
 FILTER_ORDER = 4
 
 FIGURE_DPI = 200
 
-SAVE_INTERMEDIATES = False      # if True, save intermediate MNE objects (only TRUE for pilots).
+SAVE_INTERMEDIATES = False
 
 
 # HELPER FUNCTIONS
@@ -146,19 +150,19 @@ def build_channel_qc_table(
             sci,
     })
 
-    # identify short-separation wavelength channels.
+    # identify short-separation wavelength channels
     qc["is_short_separation"] = (
         raw_distances < short_max_m
     )
 
-    # identify wavelength channels below the SCI threshold.
-    # non-finite SCI values are also treated as poor quality.
+    # identify wavelength channels below the SCI threshold
+    # non-finite SCI values are also treated as poor quality
     qc["below_SCI_threshold"] = (
         ~np.isfinite(qc["SCI"])
         | (qc["SCI"] < sci_threshold)
     )
 
-    # if either wavelength belonging to a source-detector pair fails SCI, mark the entire pair as bad.
+    # if either wavelength belonging to a source-detector pair fails SCI, mark the entire pair as bad
     qc["pair_marked_bad"] = (
         qc.groupby("pair")[
             "below_SCI_threshold"
@@ -234,7 +238,7 @@ def build_spatial_qc_tables(
     pair_rows = {}
 
 
-    # Try to identify the coordinate frame stored in MNE.
+    # try to identify the coordinate frame stored in MNE
     montage = raw.get_montage()
 
     if montage is not None:
@@ -258,7 +262,7 @@ def build_spatial_qc_tables(
         )
     ):
 
-        # Example:
+        # example:
         # "S1_D2 760" -> "S1_D2"
         pair_name = strip_measurement_suffix(
             channel_name
@@ -273,7 +277,7 @@ def build_spatial_qc_tables(
         )
 
 
-        # MNE stores coordinates in metres.
+        # MNE stores coordinates in metres
         midpoint = np.array(
             channel_info["loc"][0:3],
             dtype=float,
@@ -290,7 +294,7 @@ def build_spatial_qc_tables(
         )
 
 
-        # Save each source only once.
+        # save each source only once
         if source_name not in optode_rows:
 
             optode_rows[source_name] = {
@@ -307,7 +311,7 @@ def build_spatial_qc_tables(
             }
 
 
-        # Save each detector only once.
+        # save each detector only once
         if detector_name not in optode_rows:
 
             optode_rows[detector_name] = {
@@ -324,9 +328,9 @@ def build_spatial_qc_tables(
             }
 
 
-        # Each pair occurs twice in the raw data:
-        # once at 760 nm and once at 850 nm.
-        # Save each pair only once.
+        # each pair occurs twice in the raw data:
+        # once at 760 nm and once at 850 nm
+        # save each pair only once
         if pair_name not in pair_rows:
 
             pair_rows[pair_name] = {
@@ -373,8 +377,8 @@ def build_spatial_qc_tables(
     )
 
 
-    # Add the QC information that you already calculated:
-    # distance, SCI, short/long status, and bad-channel status.
+    # add the already calculated QC information:
+    # distance, SCI, short/long status, and bad-channel status
     channel_locations = (
         channel_locations.merge(
             pair_qc,
@@ -384,7 +388,7 @@ def build_spatial_qc_tables(
     )
 
 
-    # Sort optodes in a sensible order.
+    # sort optodes
     optode_positions["number"] = (
         optode_positions["optode"]
         .str[1:]
@@ -522,7 +526,7 @@ def plot_windowed_quality_heatmap(
     )
 
 
-    # SCI has a defined correlation-like range.
+    # SCI has a defined correlation-like range
     if metric_name == "SCI":
 
         vmin = -1
@@ -537,9 +541,8 @@ def plot_windowed_quality_heatmap(
 
     else:
 
-        # PSP does not have the same fixed scale as SCI.
-        # Use the 99th percentile so isolated extreme values
-        # do not dominate the heatmap.
+        # PSP does not have the same fixed scale as SCI
+        # use the 99th percentile so isolated extreme values do not dominate the heatmap
         finite_values = matrix[
             np.isfinite(
                 matrix
@@ -603,7 +606,7 @@ def plot_windowed_quality_heatmap(
     )
 
 
-    # Label every fifth pair so the y-axis remains readable.
+    # label every fifth pair so the y-axis remains readable
     tick_indices = np.arange(
         0,
         len(pair_order),
@@ -651,9 +654,8 @@ def run_windowed_quality_qc(
 
     These calculations are descriptive QC only.
 
-    threshold=None means MNE-NIRS will calculate the
-    metrics without adding BAD_SCI or BAD_PeakPower
-    annotations to the data.
+    A threshold of -np.inf is used so the metrics are
+    calculated without rejecting or annotating time windows.
     """
 
     print("\nWINDOWED SCI + PSP QUALITY CONTROL")
@@ -863,7 +865,7 @@ def plot_raw_intensity_heatmap(
     so temporal changes can be compared across channels.
     """
 
-    # Get wavelength stored for every raw channel.
+    # get wavelength stored for every raw channel
     channel_wavelengths = np.array(
         [
             channel_info["loc"][9]
@@ -874,7 +876,7 @@ def plot_raw_intensity_heatmap(
     )
 
 
-    # Identify the wavelengths present in the recording.
+    # identify the wavelengths present in the recording
     unique_wavelengths = np.sort(
         np.unique(
             channel_wavelengths[
@@ -893,8 +895,7 @@ def plot_raw_intensity_heatmap(
         )
 
 
-    # Sort channels by wavelength so the heatmap
-    # does not depend on the original SNIRF channel order.
+    # sort channels by wavelength so the heatmap does not depend on the original SNIRF channel order
     wavelength_order = np.argsort(
         channel_wavelengths
     )
@@ -916,7 +917,7 @@ def plot_raw_intensity_heatmap(
     )
 
 
-    # Determine where the first wavelength ends.
+    # determine where the first wavelength ends
     wavelength_split = int(
         np.sum(
             sorted_wavelengths
@@ -924,12 +925,12 @@ def plot_raw_intensity_heatmap(
         )
     )
 
-    # Raw intensity should be positive.
+    # raw intensity should be positive.
     raw_data[
         raw_data <= 0
     ] = np.nan
 
-    # Median intensity for each individual channel.
+    # median intensity for each individual channel
     channel_medians = np.nanmedian(
         raw_data,
         axis=1,
@@ -940,13 +941,13 @@ def plot_raw_intensity_heatmap(
         channel_medians == 0
     ] = np.nan
 
-    # Express each channel relative to its own median.
+    # express each channel relative to its own median
     relative_intensity = (
         raw_data
         / channel_medians
     )
 
-    # Log-transform so the channel median is centered at 0.
+    # log-transform so the channel median is centered at 0
     heatmap_data = np.log10(
         relative_intensity
     )
@@ -964,7 +965,7 @@ def plot_raw_intensity_heatmap(
         )
         return
 
-    # Limit influence of isolated extreme values.
+    # limit influence of isolated extreme values
     absolute_limit = np.nanpercentile(
         np.abs(finite_values),
         99,
@@ -973,8 +974,7 @@ def plot_raw_intensity_heatmap(
     if absolute_limit == 0:
         absolute_limit = 1
 
-    # Create figure with extra room on the right
-    # for the colour bar and interpretation text.
+    # create figure with extra room on the right for the colour bar and interpretation text
     fig, ax = plt.subplots(
         figsize=(18, 10)
     )
@@ -1013,7 +1013,7 @@ def plot_raw_intensity_heatmap(
         "(uncropped acquisition)"
     )
 
-    # Separate the 760 nm and 850 nm wavelength channels.
+    # separate 760 nm and 850 nm wavelength channels
     ax.axhline(
         wavelength_split,
         color="white",
@@ -1021,14 +1021,13 @@ def plot_raw_intensity_heatmap(
         linewidth=1.5,
     )
 
-    # Label the two wavelength sections outside the heatmap.
+    # label the two wavelength sections outside the heatmap
     n_channels = len(
         sorted_wavelengths
     )
 
 
-    # Vertical centers of each wavelength group
-    # in axis-relative coordinates.
+    # vertical centers of each wavelength group in axis-relative coordinates
     first_wavelength_center = (
         1
         - (
@@ -1075,7 +1074,7 @@ def plot_raw_intensity_heatmap(
         clip_on=False,
     )
 
-    # Colour bar.
+    # colour bar
     colorbar = fig.colorbar(
         image,
         ax=ax,
@@ -1086,7 +1085,7 @@ def plot_raw_intensity_heatmap(
         "Log10 intensity relative to channel median"
     )
 
-    # Interpretation guide.
+    # interpretation guide
     fig.text(
         0.91,
         0.62,
@@ -1101,7 +1100,7 @@ def plot_raw_intensity_heatmap(
         va="top",
     )
 
-    # Save only. Do not display figure on screen.
+    # save only. do not display figure on screen
     fig.savefig(
         output_file,
         dpi=FIGURE_DPI,
@@ -1194,62 +1193,6 @@ def plot_distance_distribution(
         output_file,
     )
 
-
-def plot_sci_distribution(
-    pair_qc,
-    output_file,
-    participant_id,
-):
-    """
-    Plot the distribution of pair-level SCI.
-
-    SCI_min is plotted because the pair is marked bad
-    when either wavelength falls below the threshold.
-    """
-
-    values = (
-        pair_qc["SCI_min"]
-        .replace(
-            [np.inf, -np.inf],
-            np.nan,
-        )
-        .dropna()
-    )
-
-    fig, ax = plt.subplots(
-        figsize=(8, 5)
-    )
-
-    ax.hist(
-        values,
-        bins=20,
-    )
-
-    ax.axvline(
-        SCI_THRESHOLD,
-        linestyle="--",
-        label=f"SCI cutoff = {SCI_THRESHOLD:.2f}",
-    )
-
-    ax.set_xlabel(
-        "Minimum SCI within source-detector pair"
-    )
-
-    ax.set_ylabel(
-        "Number of source-detector pairs"
-    )
-
-    ax.set_title(
-        f"Participant {participant_id}: "
-        "SCI distribution"
-    )
-
-    ax.legend()
-
-    save_figure(
-        fig,
-        output_file,
-    )
 
 
 def plot_sci_by_pair(
@@ -1371,8 +1314,7 @@ def plot_tddr_heatmaps(
     channel median and standard deviation for scaling.
     """
 
-    # Use all wavelength channels belonging to pairs
-    # that passed the global SCI criterion.
+    # use all wavelength channels belonging to pairs that passed the global SCI criterion
     good_channels = (
         channel_qc.loc[
             ~channel_qc["pair_marked_bad"],
@@ -1395,8 +1337,7 @@ def plot_tddr_heatmaps(
         return
 
 
-    # Read wavelength metadata and sort channels
-    # by wavelength.
+    # read wavelength metadata and sort channels by wavelength
     channel_info = []
 
     for channel in good_channels:
@@ -1453,7 +1394,7 @@ def plot_tddr_heatmaps(
     )
 
 
-    # Get identical channels before and after TDDR.
+    # get identical channels before and after TDDR
     before = raw_od.get_data(
         picks=ordered_channels
     )
@@ -1463,7 +1404,7 @@ def plot_tddr_heatmaps(
     )
 
 
-    # Use PRE-TDDR center for both datasets.
+    # use PRE-TDDR center for both datasets
     pre_tddr_center = np.median(
         before,
         axis=1,
@@ -1481,7 +1422,7 @@ def plot_tddr_heatmaps(
     )
 
 
-    # Use PRE-TDDR SD for both datasets.
+    # use PRE-TDDR SD for both datasets
     pre_tddr_scale = np.std(
         before_centered,
         axis=1,
@@ -1504,14 +1445,14 @@ def plot_tddr_heatmaps(
     )
 
 
-    # Explicitly calculate what TDDR changed.
+    # calculate what TDDR changed
     difference_plot = (
         after_plot
         - before_plot
     )
 
 
-    # Common scale for BEFORE and AFTER.
+    # common scale for BEFORE and AFTER
     combined_values = np.concatenate(
         [
             before_plot.ravel(),
@@ -1542,8 +1483,7 @@ def plot_tddr_heatmaps(
         colour_limit = 1
 
 
-    # Separate scale for the DIFFERENCE panel,
-    # because TDDR-related changes may be much smaller.
+    # separate scale for the DIFFERENCE panel because TDDR-related changes may be much smaller
     difference_values = difference_plot[
         np.isfinite(
             difference_plot
@@ -1641,7 +1581,7 @@ def plot_tddr_heatmaps(
         )
 
 
-    # Separate wavelength groups.
+    # separate wavelength groups
     if len(unique_wavelengths) == 2:
 
         wavelength_split = int(
@@ -1666,7 +1606,7 @@ def plot_tddr_heatmaps(
     )
 
 
-    # Colour bar for raw before/after comparison.
+    # colour bar for raw before/after comparison
     colorbar_signal = fig.colorbar(
         image_before,
         ax=axes[:2],
@@ -1678,7 +1618,7 @@ def plot_tddr_heatmaps(
     )
 
 
-    # Separate colour bar for TDDR-induced change.
+    # separate colour bar for TDDR-induced change
     colorbar_difference = fig.colorbar(
         image_difference,
         ax=axes[2],
@@ -1763,10 +1703,7 @@ def plot_tddr_motion_summary(
     )
 
     # EXTRACT THE <0.5-Hz COMPONENT
-    #
-    # This matches the filtering step used internally
-    # by MNE's TDDR implementation:
-    # 3rd-order Butterworth low-pass at 0.5 Hz.
+    # matches the filtering step used internally by MNE: 3rd-order Butterworth low-pass at 0.5 Hz
 
     tddr_cutoff_hz = 0.5
     tddr_filter_order = 3
@@ -1876,9 +1813,7 @@ def plot_tddr_motion_summary(
     )
 
     # EXTREME DERIVATIVE PER CHANNEL
-    #
-    # 99.9th percentile targets rare, extreme changes
-    # rather than ordinary temporal variability.
+    # 99.9th percentile targets rare extreme changes rather than ordinary temporal variability
 
     derivative_percentile = 99.9
 
@@ -1919,7 +1854,7 @@ def plot_tddr_motion_summary(
     )
 
 
-    # Percentage change provides an easy numeric summary.
+    # percentage change
     if gvtd_extreme_before > 0:
 
         gvtd_percent_change = (
@@ -2108,7 +2043,7 @@ def plot_filtering_comparison(
     )
 
 
-    # Use only channels available at BOTH stages.
+    # use only channels available at BOTH stages
     after_hbo_set = set(
         after_hbo
     )
@@ -2142,7 +2077,7 @@ def plot_filtering_comparison(
         return
 
 
-    # Mean signals before filtering.
+    # mean signals before filtering
     mean_hbo_before = (
         raw_before
         .get_data(
@@ -2162,7 +2097,7 @@ def plot_filtering_comparison(
     )
 
 
-    # Mean signals after filtering.
+    # mean signals after filtering
     mean_hbo_after = (
         raw_after
         .get_data(
@@ -2182,7 +2117,7 @@ def plot_filtering_comparison(
     )
 
 
-    # Determine ONE y-axis range from all four signals.
+    # determine ONE y-axis range from all four signals
     all_values = np.concatenate(
         [
             mean_hbo_before,
@@ -2228,7 +2163,7 @@ def plot_filtering_comparison(
         y_range = 1
 
 
-    # Small padding around the shared y-axis.
+    # small padding around the shared y-axis
     y_padding = (
         0.05
         * y_range
@@ -2349,7 +2284,7 @@ def plot_psd_filtering_comparison(
     )
 
 
-    # Use only channels available at BOTH stages.
+    # use only channels available at BOTH stages
     after_hbo_set = set(
         after_hbo
     )
@@ -2500,7 +2435,7 @@ def plot_psd_filtering_comparison(
         )
 
 
-        # Show the frequency range intended to be retained.
+        # show the frequency range intended to be retained
         ax.axvspan(
             FILTER_L_FREQ,
             FILTER_H_FREQ,
@@ -2513,7 +2448,7 @@ def plot_psd_filtering_comparison(
         )
 
 
-        # Mark the exact filter cutoffs.
+        # mark exact filter cutoffs
         ax.axvline(
             FILTER_L_FREQ,
             linestyle="--",
@@ -2685,8 +2620,8 @@ def plot_filtered_with_event_lines(
         label="HbR",
     )
 
-    # Show different experimental transitions separately.
-    # Codes:
+    # show different experimental transitions separately
+    # codes:
     # 1 = baseline rest start
     # 2 = rest after face
     # 3 = rest after house
@@ -2707,7 +2642,7 @@ def plot_filtered_with_event_lines(
         code = str(description)
 
 
-        # Rest -> Task transitions
+        # rest -> task transitions
         if code in {"4", "5"}:
 
             ax.axvline(
@@ -2726,7 +2661,7 @@ def plot_filtered_with_event_lines(
             task_label_added = True
 
 
-        # Task -> Rest transitions
+        # task -> rest transitions
         elif code in {"2", "3"}:
 
             ax.axvline(
@@ -2745,7 +2680,7 @@ def plot_filtered_with_event_lines(
             rest_label_added = True
 
 
-        # Initial baseline
+        # initial baseline
         elif code == "1":
 
             ax.axvline(
@@ -2764,7 +2699,7 @@ def plot_filtered_with_event_lines(
             baseline_label_added = True
 
 
-        # Final task end
+        # final task end
         elif code == "6":
 
             ax.axvline(
@@ -2810,10 +2745,17 @@ def preprocess_participant(
     snirf_file,
     output_root,
 ):
+    """
+    Preprocess one participant's continuous fNIRS recording.
+
+    Loads raw SNIRF data, performs signal-quality checks and
+    preprocessing, saves cleaned HbO/HbR data and QC outputs,
+    and returns the cleaned MNE Raw object and summary.
+    """
 
     print(f"PREPROCESSING PARTICIPANT {participant_id}")
 
-    # Convert file paths to Path objects
+    # convert file paths to path objects
     snirf_file = Path(snirf_file)
     output_dir = Path(output_root)
 
@@ -2836,14 +2778,13 @@ def preprocess_participant(
         preload=True,
     )
 
-    # Save original recording duration before any cropping.
+    # save original recording duration 
 
     original_recording_duration_s = float(
         raw.times[-1]
     )
 
-    # Check that the sampling rate can support the
-    # cardiac-frequency SCI / PSP filter.
+    # check that sampling rate can support the cardiac-frequency SCI / PSP filter
 
     nyquist_hz = (
         raw.info["sfreq"]
@@ -2931,7 +2872,7 @@ def preprocess_participant(
         np.unique(raw.annotations.description)
     )
 
-    # Stop preprocessing if no LSL markers are found.
+    # stop preprocessing if no LSL markers are found
 
     if len(raw.annotations) == 0:
         raise RuntimeError(
@@ -2939,8 +2880,7 @@ def preprocess_participant(
             "Check LSL recording before continuing."
         )
 
-    # Save event-marker information
-    # error: annotations_to_dataframe is not defined
+    # save event-marker information
 
     events_df = annotations_to_dataframe(
         raw
@@ -2954,11 +2894,7 @@ def preprocess_participant(
 
     # CROP NON-TASK DATA BEFORE PREPROCESSING
 
-    original_duration_s = float(
-        raw.times[-1]
-    )
-
-    crop_end_s = original_duration_s
+    crop_end_s = original_recording_duration_s
 
 
     if CROP_AT_FINAL_TASK_END:
@@ -2999,7 +2935,7 @@ def preprocess_participant(
 
         print(
             "Original recording duration:",
-            original_duration_s,
+            original_recording_duration_s,
             "seconds"
         )
 
@@ -3075,8 +3011,8 @@ def preprocess_participant(
         h_trans_bandwidth=SCI_H_TRANS_BW,
     )
 
-    # Time-resolved SCI and PSP quality control.
-    # QC only: no segments are rejected or annotated.
+    # time-resolved SCI and PSP quality control
+    # QC only: no segments are rejected or annotated
 
     windowed_sci_df, windowed_psp_df = (
         run_windowed_quality_qc(
@@ -3086,7 +3022,7 @@ def preprocess_participant(
         )
     )
 
-    # Create channel-level QC table
+    # create channel-level QC table
 
     channel_qc = build_channel_qc_table(
     raw_od=raw_od,
@@ -3097,13 +3033,13 @@ def preprocess_participant(
     )
 
 
-    # Create one-row-per-source-detector-pair QC table
+    # create one-row-per-source-detector-pair QC table
 
     pair_qc = build_pair_qc_table(
         channel_qc
     )
 
-    # Short-separation pair quality counts.
+    # short-separation pair quality counts
 
     short_pair_qc = pair_qc.loc[
         pair_qc["is_short_separation"]
@@ -3138,7 +3074,7 @@ def preprocess_participant(
     )
 
 
-    # Save optode coordinates.
+    # save optode coordinates
 
     optode_positions.to_csv(
         output_dir
@@ -3147,7 +3083,7 @@ def preprocess_participant(
     )
 
 
-    # Save channel coordinates plus SCI/QC information.
+    # save channel coordinates plus SCI/QC information
 
     channel_locations.to_csv(
         output_dir
@@ -3207,8 +3143,7 @@ def preprocess_participant(
     )
 
 
-    # Warn if this recording does not match
-    # the finalized study montage.
+    # warn if recording does not match the finalized study montage
 
     if n_sources != EXPECTED_N_SOURCES:
         warnings.warn(
@@ -3236,7 +3171,7 @@ def preprocess_participant(
         )
 
 
-    # Identify source-detector pairs below SCI threshold
+    # identify source-detector pairs below SCI threshold
 
     bad_pairs = pair_qc.loc[
         pair_qc["marked_bad"],
@@ -3244,7 +3179,7 @@ def preprocess_participant(
     ].tolist()
 
 
-    # Mark BOTH wavelengths from bad pairs as bad
+    # mark BOTH wavelengths from bad pairs as bad
 
     bad_channels = channel_qc.loc[
         channel_qc["pair"].isin(
@@ -3289,7 +3224,7 @@ def preprocess_participant(
         len(bad_channels)
     )
 
-    # Save QC tables
+    # save QC tables
 
     channel_qc.to_csv(
         output_dir
@@ -3313,7 +3248,7 @@ def preprocess_participant(
         index=False,
     )
 
-    # Check whether any short-separation channels were marked bad
+    # check whether any short-separation channels were marked bad
 
     bad_short = channel_qc.loc[
         channel_qc["pair_marked_bad"]
@@ -3437,7 +3372,7 @@ def preprocess_participant(
     )
 
 
-    # Optionally save intermediate datasets
+    # optional: save intermediate datasets
 
     if SAVE_INTERMEDIATES:
 
@@ -3458,7 +3393,7 @@ def preprocess_participant(
     print("\nCreating QC figures...")
 
 
-    # a. Source-detector distance distribution
+    # source-detector distance distribution
 
     plot_distance_distribution(
         pair_qc,
@@ -3468,12 +3403,7 @@ def preprocess_participant(
     )
 
 
-    # b. SCI distribution
-
-    # deleted
-
-
-    # c. SCI for every source-detector pair
+    # SCI for every source-detector pair
 
     plot_sci_by_pair(
         pair_qc,
@@ -3483,7 +3413,7 @@ def preprocess_participant(
     )
 
 
-    # d. TDDR whole-recording comparison
+    # TDDR whole-recording comparison
 
     plot_tddr_heatmaps(
         raw_od,
@@ -3495,7 +3425,7 @@ def preprocess_participant(
     )
 
 
-    # e. TDDR quantitative motion summary
+    # TDDR quantitative motion summary
 
     plot_tddr_motion_summary(
         raw_od,
@@ -3507,7 +3437,7 @@ def preprocess_participant(
     )
 
 
-    # f. HbO/HbR before vs after temporal filtering
+    # HbO/HbR before vs after temporal filtering
 
     plot_filtering_comparison(
         raw_hb_long,
@@ -3518,7 +3448,7 @@ def preprocess_participant(
     )
 
 
-    # g. PSD before vs after temporal filtering
+    # PSD before vs after temporal filtering
 
     plot_psd_filtering_comparison(
         raw_hb_long,
@@ -3529,7 +3459,7 @@ def preprocess_participant(
     )
 
 
-    # i. LSL event-marker timeline
+    # LSL event-marker timeline
 
     plot_event_timeline(
         raw_hb_filtered,
@@ -3539,7 +3469,7 @@ def preprocess_participant(
     )
 
 
-    # j. Final HbO/HbR signal with event markers
+    # final HbO/HbR signal with event markers
 
     plot_filtered_with_event_lines(
         raw_hb_filtered,
@@ -3548,13 +3478,13 @@ def preprocess_participant(
         participant_id,
     )
 
-    # Final analyzed recording duration after cropping.
+    # final analyzed recording duration after cropping
 
     cropped_recording_duration_s = float(
         raw.times[-1]
     )
     
-    #15. FINAL CHANNEL COUNTS
+    # 15. FINAL CHANNEL COUNTS
 
     good_hbo, good_hbr = (
         get_good_hb_channels(
@@ -3562,7 +3492,7 @@ def preprocess_participant(
         )
     )
 
-    # Final long-separation pair coverage
+    # final long-separation pair coverage
 
     all_long_pairs = {
         strip_measurement_suffix(channel)
@@ -3622,6 +3552,31 @@ def preprocess_participant(
         else np.nan
     )
 
+    # SCI summary statistics using finite values only.
+
+    finite_sci = sci[
+        np.isfinite(sci)
+    ]
+
+    if finite_sci.size > 0:
+        mean_sci = float(
+            np.mean(finite_sci)
+        )
+        median_sci = float(
+            np.median(finite_sci)
+        )
+        minimum_sci = float(
+            np.min(finite_sci)
+        )
+        maximum_sci = float(
+            np.max(finite_sci)
+        )
+    else:
+        mean_sci = np.nan
+        median_sci = np.nan
+        minimum_sci = np.nan
+        maximum_sci = np.nan
+
     # 16. CREATE PREPROCESSING SUMMARY
 
     summary = {
@@ -3662,6 +3617,15 @@ def preprocess_participant(
 
             "sci_h_trans_bandwidth_hz":
                 SCI_H_TRANS_BW,
+            
+            "windowed_qc_window_s":
+                WINDOWED_QC_WINDOW_S,
+
+            "crop_at_final_task_end":
+                CROP_AT_FINAL_TASK_END,
+
+            "final_task_end_code":
+                FINAL_TASK_END_CODE,
 
             "ppf":
                 PPF,
@@ -3710,7 +3674,15 @@ def preprocess_participant(
                 len(
                     raw.annotations
                 ),
+        },
 
+        "qc": {
+
+            "n_short_wavelength_channels":
+                int(
+                    short_raw_mask.sum()
+                ),
+            
             "n_short_pairs":
                 n_short_pairs,
 
@@ -3719,13 +3691,15 @@ def preprocess_participant(
 
             "n_bad_short_pairs":
                 n_bad_short_pairs,
-        },
 
-        "qc": {
+            "percent_good_short_pairs":
+                float(
+                    percent_good_short_pairs
+                ),
 
-            "n_short_wavelength_channels":
-                int(
-                    short_raw_mask.sum()
+            "percent_bad_short_pairs":
+                float(
+                    percent_bad_short_pairs
                 ),
 
             "n_bad_wavelength_channels":
@@ -3739,27 +3713,38 @@ def preprocess_participant(
                 ),
 
             "mean_sci":
-                float(
-                    np.mean(sci)
-                ),
+                mean_sci,
 
             "median_sci":
-                float(
-                    np.median(sci)
-                ),
+                median_sci,
 
             "minimum_sci":
-                float(
-                    np.min(sci)
-                ),
+                minimum_sci,
 
             "maximum_sci":
-                float(
-                    np.max(sci)
-                ),
+                maximum_sci,
         },
 
         "final_data": {
+
+            "n_long_pairs":
+                n_long_pairs,
+
+            "n_good_long_pairs":
+                n_good_long_pairs,
+
+            "n_bad_long_pairs":
+                n_bad_long_pairs,
+
+            "percent_good_long_pairs":
+                float(
+                    percent_good_long_pairs
+                ),
+
+            "percent_bad_long_pairs":
+                float(
+                    percent_bad_long_pairs
+                ),
 
             "n_long_hb_channels":
                 len(
@@ -3790,12 +3775,12 @@ def preprocess_participant(
 
     # 17. SAVE JSON SUMMARY
 
-    parameter_file = (
+    summary_json_file = (
         output_dir
         / f"{participant_id}_preprocessing_summary.json"
     )
 
-    with parameter_file.open("w") as f:
+    with summary_json_file.open("w") as f:
 
         json.dump(
             summary,
@@ -3830,8 +3815,8 @@ Band-pass filter: {FILTER_L_FREQ}-{FILTER_H_FREQ} Hz
 Filter order: {FILTER_ORDER}
 
 QUALITY CONTROL
-Mean SCI: {np.mean(sci):.4f}
-Median SCI: {np.median(sci):.4f}
+Mean SCI: {mean_sci:.4f}
+Median SCI: {median_sci:.4f}
 Bad source-detector pairs: {len(bad_pairs)}
 Bad wavelength channels: {len(bad_channels)}
 Short-separation pairs: {n_short_pairs}
@@ -3899,15 +3884,17 @@ Cleaned file: {cleaned_file}
     )
 
 
-    # Keep cleaned data and summary available in Python after the function finishes.
+    # keep cleaned data and summary available in Python after the function finishes
 
     return raw_hb_filtered, summary
 
 
 # RUN PARTICIPANT
 
-cleaned_hb, preprocessing_summary = preprocess_participant(
-    participant_id=PARTICIPANT_ID,
-    snirf_file=SNIRF_FILE,
-    output_root=OUTPUT_ROOT,
-)
+if __name__ == "__main__":
+
+    cleaned_hb, preprocessing_summary = preprocess_participant(
+        participant_id=PARTICIPANT_ID,
+        snirf_file=SNIRF_FILE,
+        output_root=OUTPUT_ROOT,
+    )
